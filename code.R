@@ -7,6 +7,8 @@ library(forecast)
 library(tseries)
 library(corrplot)
 library(gridExtra)
+library(astsa)
+library(xgboost)
 
 # ===========================
 # DATA PREPARATION
@@ -95,8 +97,6 @@ plot(decomp)
 # ===========================
 # CROSS-CORRELATION ANALYSIS
 # ===========================
-
-# Visual check of lagged relationships
 ts_PRCP <- ts(cocoa_data$PRCP)
 ts_Price <- ts(cocoa_data$Price)
 ccf(ts_Price, ts_PRCP, lag.max = 12, main = "CCF: Cocoa Price vs Rainfall")
@@ -104,49 +104,57 @@ ccf(ts_Price, ts_PRCP, lag.max = 12, main = "CCF: Cocoa Price vs Rainfall")
 # ===========================
 # PERIODICITY ANALYSIS
 # ===========================
-
-# Raw periodogram to detect cycles
 mvspec(cocoa_data$Price, log = "no", main = "Periodogram of Cocoa Price")
-
-# Smoothed periodogram using Daniell kernel
 mvspec(cocoa_data$Price, kernel("daniell", 3), log = "no", main = "Smoothed Periodogram")
 
+# Additional weather lag feature
 cocoa_data <- cocoa_data %>%
   mutate(PRCP_Lag1 = lag(PRCP, 5)) %>%
   mutate(PRCP_Lag1 = replace_na(PRCP_Lag1, 0))
+
+# Create lagged dataset for modeling
+cocoa_data_lagged <- create_lags(cocoa_data) %>%
+  drop_na() %>%
+  mutate(across(where(is.numeric) & !where(lubridate::is.Date), ~ round(.x, 3)))
+
+# ===========================
+# ADD DATE-BASED FEATURES FOR XGBOOST
+# ===========================
+cocoa_data_lagged <- cocoa_data_lagged %>%
+  mutate(month = month(Date),
+         day_of_year = yday(Date))
 
 # ===========================
 # MODEL FITTING & FORECASTING
 # ===========================
 
-# 1. Split data into training and testing sets (80/20)
+# Split data into training and testing sets (80/20) using the non-lagged cocoa_data
 train_size <- floor(0.8 * nrow(cocoa_data))
 train_data <- cocoa_data[1:train_size, ]
 test_data <- cocoa_data[(train_size + 1):nrow(cocoa_data), ]
 
-# 2. External regressors
+# External regressors
 external_vars <- c("PRCP", "TAVG", "TMAX", "TMIN", "ExchangeRate")
 external_regressors_train <- train_data %>% select(all_of(external_vars))
 external_regressors_test <- test_data %>% select(all_of(external_vars))
 
-# 3. Fit ETS model (no exogenous regressors)
+# Fit ETS model (no exogenous regressors)
 ets_model <- ets(train_data$Price)
 
-# 4. Fit ARIMAX model (no seasonal component)
+# Fit ARIMAX model (no seasonal component)
 arimax_model <- auto.arima(train_data$Price, xreg = as.matrix(external_regressors_train), seasonal = FALSE)
 
-# 5. Fit SARIMAX model (with seasonal component)
+# Fit SARIMAX model (with seasonal component)
 sarimax_model <- auto.arima(train_data$Price, xreg = as.matrix(external_regressors_train), seasonal = TRUE)
 
-# 6. Forecast with each model
+# Forecast with each model
 ets_forecast <- forecast(ets_model, h = nrow(test_data))
 arimax_forecast <- forecast(arimax_model, xreg = as.matrix(external_regressors_test), h = nrow(test_data))
 sarimax_forecast <- forecast(sarimax_model, xreg = as.matrix(external_regressors_test), h = nrow(test_data))
 
 # ===========================
-# XGBOOST Walk-Forward Forecast
+# IMPROVED XGBOOST WALK-FORWARD FORECAST
 # ===========================
-
 initial_size <- floor(0.8 * nrow(cocoa_data_lagged))
 forecast_horizon <- nrow(cocoa_data_lagged) - initial_size
 
@@ -156,16 +164,47 @@ xgb_dates <- c()
 
 for (i in 1:forecast_horizon) {
   xgb_train <- cocoa_data_lagged[1:(initial_size + i - 1), ]
-  xgb_test <- cocoa_data_lagged[(initial_size + i), ]
+  xgb_test  <- cocoa_data_lagged[(initial_size + i), ]
   
-  x_train <- xgb_train %>% select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate)
+  # Use lag features plus external regressors and new date-based features
+  x_train <- xgb_train %>% 
+    select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate, month, day_of_year)
   y_train <- xgb_train$log_price
-  x_test <- xgb_test %>% select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate)
+  x_test  <- xgb_test %>% 
+    select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate, month, day_of_year)
   
   dtrain <- xgb.DMatrix(data = as.matrix(x_train), label = y_train)
-  dtest <- xgb.DMatrix(data = as.matrix(x_test))
+  dtest  <- xgb.DMatrix(data = as.matrix(x_test))
   
-  model <- xgboost(data = dtrain, nrounds = 100, objective = "reg:squarederror", verbose = 0)
+  # Define improved hyperparameters
+  params <- list(
+    objective = "reg:squarederror",
+    max_depth = 6,
+    eta = 0.05,
+    subsample = 0.9,
+    colsample_bytree = 0.8
+  )
+  
+  # Cross-validation to find the best number of rounds
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nrounds = 200,
+    nfold = 5,
+    early_stopping_rounds = 10,
+    verbose = 0
+  )
+  
+  best_nrounds <- cv$best_iteration
+  
+  # Train the model with best_nrounds
+  model <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  
   pred_log <- predict(model, dtest)
   pred_price <- exp(pred_log)
   
@@ -177,16 +216,11 @@ for (i in 1:forecast_horizon) {
 # ===========================
 # COMBINE FORECASTS
 # ===========================
-
 # XGBoost forecast DF
-xgb_dates <- as.Date(xgb_dates)
-
-
 xgb_df <- tibble(
-  Date = xgb_dates,
+  Date = as.Date(xgb_dates),
   XGBoost = xgb_predictions
-) 
-
+)
 
 # Align other models' forecasts
 forecast_df <- tibble(
@@ -197,7 +231,7 @@ forecast_df <- tibble(
   SARIMAX = as.numeric(sarimax_forecast$mean)
 )
 
-# Merge all into a long format for plotting
+# Merge for plotting (long format)
 plot_df <- forecast_df %>%
   left_join(xgb_df, by = "Date") %>%
   pivot_longer(cols = -Date, names_to = "Model", values_to = "Price")
@@ -205,7 +239,6 @@ plot_df <- forecast_df %>%
 # ===========================
 # PLOT ALL MODEL FORECASTS
 # ===========================
-
 ggplot(plot_df, aes(x = Date, y = Price, color = Model)) +
   geom_line(linewidth = 0.5) +
   labs(
@@ -226,12 +259,14 @@ ggplot(plot_df, aes(x = Date, y = Price, color = Model)) +
 # ===========================
 # FORECAST ACCURACY METRICS
 # ===========================
+ets_accuracy <- forecast::accuracy(ets_forecast, test_data$Price)
+arimax_accuracy <- forecast::accuracy(arimax_forecast, test_data$Price)
+sarimax_accuracy <- forecast::accuracy(sarimax_forecast, test_data$Price)
 
-ets_accuracy <- accuracy(ets_forecast, test_data$Price)
-arimax_accuracy <- accuracy(arimax_forecast, test_data$Price)
-sarimax_accuracy <- accuracy(sarimax_forecast, test_data$Price)
-xgb_rmse <- sqrt(mean((xgb_df$XGBoost - xgb_df$Date %>% 
-                         map_dbl(~ forecast_df$Actual[forecast_df$Date == .]))^2))
+# Compute XGBoost RMSE using merged forecasts
+xgb_merged <- xgb_df %>%
+  left_join(forecast_df %>% select(Date, Actual), by = "Date")
+xgb_rmse <- sqrt(mean((xgb_merged$XGBoost - xgb_merged$Actual)^2, na.rm = TRUE))
 
 # Print results
 print("ETS Accuracy:")
@@ -243,4 +278,4 @@ print(arimax_accuracy)
 print("SARIMAX Accuracy:")
 print(sarimax_accuracy)
 
-print(paste("XGBoost RMSE:", round(xgb_rmse, 2)))
+print(paste("Improved XGBoost RMSE:", round(xgb_rmse, 2)))
