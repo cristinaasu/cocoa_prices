@@ -153,7 +153,7 @@ arimax_forecast <- forecast(arimax_model, xreg = as.matrix(external_regressors_t
 sarimax_forecast <- forecast(sarimax_model, xreg = as.matrix(external_regressors_test), h = nrow(test_data))
 
 # ===========================
-# IMPROVED XGBOOST WALK-FORWARD FORECAST
+# XGBOOST WALK-FORWARD FORECAST
 # ===========================
 initial_size <- floor(0.8 * nrow(cocoa_data_lagged))
 forecast_horizon <- nrow(cocoa_data_lagged) - initial_size
@@ -278,4 +278,4 @@ print(arimax_accuracy)
 print("SARIMAX Accuracy:")
 print(sarimax_accuracy)
 
-print(paste("Improved XGBoost RMSE:", round(xgb_rmse, 2)))
+print(paste("XGBoost RMSE:", round(xgb_rmse, 2)))
