@@ -15,9 +15,9 @@ library(xgboost)
 # ===========================
 
 # Load datasets
-cocoa_prices <- read.csv("data/Daily Prices_ICCO.csv")
-ghana_weather <- read.csv("data/Ghana_data.csv")
-exchange_rate <- read.csv("data/USD_GHS_1994_2024.csv") %>%
+cocoa_prices <- read.csv("data/raw_data/Daily Prices_ICCO.csv")
+ghana_weather <- read.csv("data/raw_data/Ghana_data.csv")
+exchange_rate <- read.csv("data/raw_data/USD_GHS_1994_2024.csv") %>%
   select(Date, ExchangeRate = Price)
 
 # Format date columns
@@ -45,9 +45,10 @@ cocoa_data <- cocoa_prices %>%
 
 # Feature engineering: log & differencing
 cocoa_data <- cocoa_data %>%
-  mutate(log_price = log(Price),
-         diff_log_price = c(NA, diff(log_price))) %>%
+  mutate(log_price = log(Price)) %>%
   drop_na()
+
+write.csv(cocoa_data, "data/clean_data/cocoa_data.csv", row.names = FALSE)
 
 # Create lag features for modeling
 create_lags <- function(data, lags = 1:7) {
@@ -57,9 +58,11 @@ create_lags <- function(data, lags = 1:7) {
   return(data)
 }
 
-cocoa_data <- create_lags(cocoa_data) %>%
+cocoa_data_lagged <- create_lags(cocoa_data) %>%
   drop_na() %>%
   mutate(across(where(is.numeric) & !where(lubridate::is.Date), ~ round(.x, 3)))
+
+write.csv(cocoa_data_lagged, "data/clean_data/cocoa_data_lagged.csv", row.names = FALSE)
 
 # ===========================
 # EXPLORATORY DATA ANALYSIS
@@ -95,11 +98,10 @@ decomp <- stl(price_ts, s.window = "periodic")
 plot(decomp)
 
 # ===========================
-# CROSS-CORRELATION ANALYSIS
+# ACF PLOT 
 # ===========================
-ts_PRCP <- ts(cocoa_data$PRCP)
-ts_Price <- ts(cocoa_data$Price)
-ccf(ts_Price, ts_PRCP, lag.max = 12, main = "CCF: Cocoa Price vs Rainfall")
+acf(cocoa_data$Price, main = "ACF of Cocoa Prices")
+
 
 # ===========================
 # PERIODICITY ANALYSIS
@@ -107,54 +109,38 @@ ccf(ts_Price, ts_PRCP, lag.max = 12, main = "CCF: Cocoa Price vs Rainfall")
 mvspec(cocoa_data$Price, log = "no", main = "Periodogram of Cocoa Price")
 mvspec(cocoa_data$Price, kernel("daniell", 3), log = "no", main = "Smoothed Periodogram")
 
-# Additional weather lag feature
-cocoa_data <- cocoa_data %>%
-  mutate(PRCP_Lag1 = lag(PRCP, 5)) %>%
-  mutate(PRCP_Lag1 = replace_na(PRCP_Lag1, 0))
-
-# Create lagged dataset for modeling
-cocoa_data_lagged <- create_lags(cocoa_data) %>%
-  drop_na() %>%
-  mutate(across(where(is.numeric) & !where(lubridate::is.Date), ~ round(.x, 3)))
-
-# ===========================
-# ADD DATE-BASED FEATURES FOR XGBOOST
-# ===========================
-cocoa_data_lagged <- cocoa_data_lagged %>%
-  mutate(month = month(Date),
-         day_of_year = yday(Date))
-
 # ===========================
 # MODEL FITTING & FORECASTING
 # ===========================
 
-# Split data into training and testing sets (80/20) using the non-lagged cocoa_data
+# 1. Split data into training and testing sets (80/20)
 train_size <- floor(0.8 * nrow(cocoa_data))
 train_data <- cocoa_data[1:train_size, ]
 test_data <- cocoa_data[(train_size + 1):nrow(cocoa_data), ]
 
-# External regressors
+# 2. External regressors
 external_vars <- c("PRCP", "TAVG", "TMAX", "TMIN", "ExchangeRate")
 external_regressors_train <- train_data %>% select(all_of(external_vars))
 external_regressors_test <- test_data %>% select(all_of(external_vars))
 
-# Fit ETS model (no exogenous regressors)
+# 3. Fit ETS model (no exogenous regressors)
 ets_model <- ets(train_data$Price)
 
-# Fit ARIMAX model (no seasonal component)
+# 4. Fit ARIMAX model (no seasonal component)
 arimax_model <- auto.arima(train_data$Price, xreg = as.matrix(external_regressors_train), seasonal = FALSE)
 
-# Fit SARIMAX model (with seasonal component)
+# 5. Fit SARIMAX model (with seasonal component)
 sarimax_model <- auto.arima(train_data$Price, xreg = as.matrix(external_regressors_train), seasonal = TRUE)
 
-# Forecast with each model
+# 6. Forecast with each model
 ets_forecast <- forecast(ets_model, h = nrow(test_data))
 arimax_forecast <- forecast(arimax_model, xreg = as.matrix(external_regressors_test), h = nrow(test_data))
 sarimax_forecast <- forecast(sarimax_model, xreg = as.matrix(external_regressors_test), h = nrow(test_data))
 
 # ===========================
-# XGBOOST WALK-FORWARD FORECAST
+# XGBOOST Walk-Forward Forecast
 # ===========================
+
 initial_size <- floor(0.8 * nrow(cocoa_data_lagged))
 forecast_horizon <- nrow(cocoa_data_lagged) - initial_size
 
@@ -164,47 +150,16 @@ xgb_dates <- c()
 
 for (i in 1:forecast_horizon) {
   xgb_train <- cocoa_data_lagged[1:(initial_size + i - 1), ]
-  xgb_test  <- cocoa_data_lagged[(initial_size + i), ]
+  xgb_test <- cocoa_data_lagged[(initial_size + i), ]
   
-  # Use lag features plus external regressors and new date-based features
-  x_train <- xgb_train %>% 
-    select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate, month, day_of_year)
+  x_train <- xgb_train %>% select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate)
   y_train <- xgb_train$log_price
-  x_test  <- xgb_test %>% 
-    select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate, month, day_of_year)
+  x_test <- xgb_test %>% select(starts_with("lag_"), PRCP, TAVG, TMAX, TMIN, ExchangeRate)
   
   dtrain <- xgb.DMatrix(data = as.matrix(x_train), label = y_train)
-  dtest  <- xgb.DMatrix(data = as.matrix(x_test))
+  dtest <- xgb.DMatrix(data = as.matrix(x_test))
   
-  # Define improved hyperparameters
-  params <- list(
-    objective = "reg:squarederror",
-    max_depth = 6,
-    eta = 0.05,
-    subsample = 0.9,
-    colsample_bytree = 0.8
-  )
-  
-  # Cross-validation to find the best number of rounds
-  cv <- xgb.cv(
-    params = params,
-    data = dtrain,
-    nrounds = 200,
-    nfold = 5,
-    early_stopping_rounds = 10,
-    verbose = 0
-  )
-  
-  best_nrounds <- cv$best_iteration
-  
-  # Train the model with best_nrounds
-  model <- xgb.train(
-    params = params,
-    data = dtrain,
-    nrounds = best_nrounds,
-    verbose = 0
-  )
-  
+  model <- xgboost(data = dtrain, nrounds = 100, objective = "reg:squarederror", verbose = 0)
   pred_log <- predict(model, dtest)
   pred_price <- exp(pred_log)
   
@@ -218,9 +173,11 @@ for (i in 1:forecast_horizon) {
 # ===========================
 # XGBoost forecast DF
 xgb_df <- tibble(
-  Date = as.Date(xgb_dates),
+  Date = as.Date(xgb_dates, origin = "1970-01-01"),
   XGBoost = xgb_predictions
 )
+saveRDS(xgb_df, "data/clean_data/xgb_df.rds")
+
 
 # Align other models' forecasts
 forecast_df <- tibble(
@@ -231,10 +188,13 @@ forecast_df <- tibble(
   SARIMAX = as.numeric(sarimax_forecast$mean)
 )
 
-# Merge for plotting (long format)
+# Merge all into a long format for plotting
 plot_df <- forecast_df %>%
-  left_join(xgb_df, by = "Date") %>%
+  left_join(xgb_df, by = "Date", relationship = "many-to-many") %>%
   pivot_longer(cols = -Date, names_to = "Model", values_to = "Price")
+
+saveRDS(plot_df, "data/clean_data/plot_df.rds")
+
 
 # ===========================
 # PLOT ALL MODEL FORECASTS
@@ -279,3 +239,120 @@ print("SARIMAX Accuracy:")
 print(sarimax_accuracy)
 
 print(paste("XGBoost RMSE:", round(xgb_rmse, 2)))
+
+
+# ===========================
+# RESIDUAL DIAGNOSTICS FOR XGBOOST
+# ===========================
+
+# Residuals
+xgb_walk_df <- tibble(
+  Date = as.Date(xgb_dates, origin = "1970-01-01"),
+  Actual = xgb_actuals,
+  Predicted = xgb_predictions
+)
+
+residuals_xgb <- xgb_walk_df$Actual - xgb_walk_df$Predicted
+
+
+
+# 1. Plot residuals over time
+ggplot(data.frame(Date = xgb_walk_df$Date, Residuals = residuals_xgb), 
+       aes(x = Date, y = Residuals)) +
+  geom_line(color = "darkred") +
+  labs(title = "XGBoost Residuals Over Time", y = "Residual", x = "Date") +
+  theme_minimal()
+
+# 2. Check for autocorrelation
+acf(residuals_xgb, main = "ACF of XGBoost Residuals")
+
+# 3. Ljung-Box Test for autocorrelation
+ljung_xgboox <- Box.test(residuals_xgb, lag = 12, type = "Ljung-Box")
+
+# 4. Optional: Histogram + Q-Q Plot for normality
+hist(residuals_xgb, breaks = 30, main = "Histogram of XGBoost Residuals", col = "gray")
+
+qqnorm(residuals_xgb)
+qqline(residuals_xgb, col = "blue")
+
+
+# =====================================================
+# ADDITIONAL: RESIDUAL ANALYSIS FOR ETS, ARIMAX, SARIMAX
+# =====================================================
+
+# Compute residuals
+residuals_ets <- ets_forecast$mean - test_data$log_price
+residuals_arimax <- arimax_forecast$mean - test_data$log_price
+residuals_sarimax <- sarimax_forecast$mean - test_data$log_price
+
+# Combine with dates
+residuals_df <- tibble(
+  Date = test_data$Date,
+  ETS = residuals_ets,
+  ARIMAX = residuals_arimax,
+  SARIMAX = residuals_sarimax
+)
+
+# ===========================
+# 1. Residual Plots Over Time
+# ===========================
+residuals_long <- residuals_df %>%
+  pivot_longer(cols = -Date, names_to = "Model", values_to = "Residual")
+
+ggplot(residuals_long, aes(x = Date, y = Residual, color = Model)) +
+  geom_line(linewidth = 0.4) +
+  labs(title = "Residuals Over Time (ETS, ARIMAX, SARIMAX)", x = "Date", y = "Residual") +
+  theme_minimal()
+
+
+
+# ===========================
+# 2. ACF of Residuals
+# ===========================
+par(mfrow = c(1, 3))
+acf(residuals_ets, main = "ACF: ETS Residuals")
+acf(residuals_arimax, main = "ACF: ARIMAX Residuals")
+acf(residuals_sarimax, main = "ACF: SARIMAX Residuals")
+par(mfrow = c(1, 1))
+
+# ===========================
+# 3. Ljung-Box Test
+# ===========================
+ljung_ets <- Box.test(residuals_ets, lag = 12, type = "Ljung-Box")
+ljung_arimax <- Box.test(residuals_arimax, lag = 12, type = "Ljung-Box")
+ljung_sarimax <- Box.test(residuals_sarimax, lag = 12, type = "Ljung-Box")
+
+print("Ljung-Box Test (ETS):")
+print(ljung_ets)
+
+print("Ljung-Box Test (ARIMAX):")
+print(ljung_arimax)
+
+print("Ljung-Box Test (SARIMAX):")
+print(ljung_sarimax)
+
+print(ljung_xgboox)
+
+# ===========================
+# 4. Histograms + QQ Plots
+# ===========================
+par(mfrow = c(3, 2))
+
+# ETS
+hist(residuals_ets, breaks = 30, main = "Histogram: ETS", col = "gray")
+qqnorm(residuals_ets); qqline(residuals_ets, col = "blue")
+
+# ARIMAX
+hist(residuals_arimax, breaks = 30, main = "Histogram: ARIMAX", col = "gray")
+qqnorm(residuals_arimax); qqline(residuals_arimax, col = "blue")
+
+# SARIMAX
+hist(residuals_sarimax, breaks = 30, main = "Histogram: SARIMAX", col = "gray")
+qqnorm(residuals_sarimax); qqline(residuals_sarimax, col = "blue")
+
+
+
+
+
+
+

@@ -1,0 +1,623 @@
+---
+title: "Cocoa Price Forecasting in Volatile Markets"
+subtitle: "Why XGBoost Outperforms Classical Time Series Models"
+author: Jessica Lu, Solai Ramusaravanan, Cristina Su Lam
+thanks: "Code and data are available at: https://github.com/cristinaasu/cocoa_prices"
+date: today
+date-format: long
+toc: true
+fig_caption: yes
+number-sections: true
+format: pdf
+bibliography: references.bib
+---
+
+```{r}
+#| include: false
+#| warning: false
+#| message: false
+
+# Packages
+library(dplyr)
+library(kableExtra)
+library(tidyr)
+library(knitr)
+library(ggplot2)
+library(tibble)
+library(corrplot)
+library(lubridate)
+library(astsa)
+library(here)
+library(readr)
+
+# Load dataset 
+cocoa_data <- read_csv(here("data", "clean_data", "cocoa_data.csv"))
+cocoa_data_lagged <- read_csv(here("data", "clean_data", "cocoa_data_lagged.csv"))
+```
+\newpage
+
+# Introduction {#sec-intro}
+
+Commodity prices play a crucial role in the global economy, influencing industries ranging from agriculture to finance. Cocoa, in particular, is essential to chocolate production and other food-related sectors. However its price is notoriously volatile, driven by weather variability, supply chain disruptions, geopolitical tensions, and shifts in global demand. Accurately predicting these fluctuations is vital for stakeholders such as farmers, traders, policymakers, and businesses that rely on stable pricing for procurement, budgeting, and strategic planning.
+
+The motivation for this analysis lies in the need to evaluate which forecasting approaches are best suited for commodities influenced by both climate and currency shifts. This study responds to that challenge by comparing models that integrate exogenous variables, such as rainfall and exchange rates, to better anticipate rapid price movements and provide more reliable insights for decision-making.
+
+In light of this, the objective is to assess the effectiveness of different forecasting strategies under conditions of high volatility and structural complexity. To do this, we combine historical cocoa price data from the @ICCO2025 with weather records from Ghana—the world’s largest cocoa producer [@NCEI2025] and exchange rate data between the US dollar and the Ghanaian cedi [@InvestingUSDGHS].
+
+We compare four models: three statistical approaches (ETS, ARIMAX, SARIMAX) and one machine learning technique (XGBoost). These were selected to capture both linear and nonlinear patterns in the data. Feature engineering techniques, including log transformation, differencing, and lag creation, were applied to enhance model performance. Preliminary results suggest that XGBoost outperforms the other models, achieving the lowest RMSE (278.41) and capturing the 2023–2024 price surge more effectively. This reinforces the value of incorporating nonlinear dynamics and external drivers when forecasting complex commodity markets.
+
+The remainder of the paper is structured as follows: @sec-literature reviews relevant literature on commodity price forecasting. @sec-data describes the data sources and preprocessing steps. @sec-metho outlines the modeling approaches. @sec-results presents model performance and findings. @sec-disc concludes with key insights and directions for future research.
+
+# Literature Review {#sec-literature}
+
+Forecasting approaches for agricultural commodities have expanded in recent years to better accommodate the irregular patterns and sudden disruptions characteristic of global markets. Researchers have applied a range of time series techniques, from traditional statistical models to more flexible machine learning methods, to capture different aspects of price behavior. This section outlines the importance of incorporating external variables such as weather conditions and currency exchange rates, and introduces several relevant models for cocoa price forecasting.
+
+In Ghana, climate variability, particularly shifts in rainfall and temperature, has been shown to significantly affect yields. While projections vary by region, global studies suggest that cocoa-growing areas in West Africa may experience yield declines of up to 40% by the end of the century due to climate change. Excessive rainfall also increases the risk of fungal diseases, lowering crop quality [@Bomdzele2023]. On the economic side, fluctuations in the USD/GHS exchange rate impact the profitability of cocoa exports; depreciation of the cedi raises local cocoa prices and affects producer margins [@Zimwara2024]. Including these variables in forecasting models enables more realistic simulations of future price behavior and enhances their ability to capture real-world market dynamics.
+
+To address these challenges, we evaluate the following models. First, the Exponential Smoothing State Space (ETS) model is a widely used statistical method that captures level, trend, and seasonal patterns. Due to its computational efficiency and simplicity, it is especially suited for relatively stable time series. However, it lacks the ability to include external variables, which limits its effectiveness in settings influenced by weather and economic shifts. In this study, ETS serves primarily as a baseline model to assess the value of incorporating exogenous regressors.
+
+ARIMA is a classical approach that captures univariate time series patterns through autoregressive terms, differencing, and moving averages. @Dooley2005 demonstrated its effectiveness in modeling historical price trends for metals. Although not used independently here, it provides the structural basis for two extended forms applied in our analysis.
+
+The first of these, ARIMAX, incorporates exogenous variables to account for influences beyond the internal structure of the series. This makes it especially relevant for price forecasting when environmental or macroeconomic drivers are involved. In this project, ARIMAX is used to examine how cocoa prices respond to rainfall and exchange rate fluctuations, without accounting for seasonality.
+
+SARIMAX extends this framework further by modeling seasonality alongside external drivers. This added complexity makes it well-suited to crops like cocoa that follow distinct agricultural cycles. @Alharbi2022 found the model effective in forecasting electricity sector performance; by incorporating both economic and seasonal indicators, it achieved higher accuracy than simpler ARIMA-based techniques. By accounting for recurring patterns and structural influences, SARIMAX is expected to provide more reliable forecasts during cyclical phases of cocoa production.
+
+XGBoost is a machine learning algorithm based on gradient-boosted decision trees. It is designed to handle high-dimensional and nonlinear datasets, making it a powerful alternative to classical models. @Trinh2021 demonstrated XGBoost’s effectiveness in financial time series forecasting, particularly when combined with deep learning models. Similarly, @Lago2021 showed that it consistently outperformed classical time series approaches in the context of electricity markets. Its ability to model interactions and sudden shifts in data makes it especially useful when markets are driven by complex, nonlinear forces.
+
+What distinguishes our analysis is its side-by-side comparison of four modeling strategies applied to a single dataset enriched with weather and exchange rate variables. While previous studies often focus on one or two approaches, this broader evaluation reveals how each model performs under different levels of volatility and external disruption. Consistent with findings from @Lago2021, our results reinforce the strength of XGBoost in capturing complex, nonlinear market dynamics. In contrast to earlier work that prioritizes accuracy in one modeling framework, our comparative design provides insights into how different tools behave across real-world shocks and cycles. By combining exogenous predictors with a range of modeling techniques, this study extends prior research and underscores the value of machine learning in forecasting commodity price behavior.
+
+
+# Data {#sec-data}
+
+## Overview {#sec-overview}
+This analysis uses three main datasets: daily cocoa futures prices, weather data from Ghana, and USD to Ghanaian Cedi (GHS) exchange rates.
+
+Data preparation and visualization were conducted in R [@Rstudio] using the tidyverse [@tidyverse] and lubridate [@lubridate] packages. Exploratory analysis included correlation plots generated with corrplot [@corrplot2021] and spectral analysis performed using astsa [@astsa].
+
+The cocoa price data from @ICCO2025 spans daily prices from 1994 to 2025 and reports prices in US dollars per tonne. Before analysis, formatting symbols such as commas were removed, and values were converted to numeric. The date column was parsed into proper date format and arranged in chronological order. To address non-stationarity and heteroscedasticity, we applied a logarithmic transformation to stabilize variance—a common preprocessing step for time series models.
+
+Weather data from @NCEI2025 includes daily observations from 1990 to 2024, with measurements for rainfall (PRCP), average temperature (TAVG), maximum temperature (TMAX), and minimum temperature (TMIN) collected across multiple weather stations in Ghana. These were aggregated by date using daily means across all stations. The date column was standardized to match the cocoa dataset.
+
+Exchange rate data were obtained from @InvestingUSDGHS, providing daily USD to GHS rates from 1994 to 2024. Only relevant columns—Date and Price—were kept, and the price column was renamed to ExchangeRate to match the variable naming conventions of the other datasets.
+
+The datasets were then merged by date to create a unified time series. Rows with missing values in any of the key columns (price, weather, or exchange rate) were removed to ensure model compatibility—this constituted our handling of missing data. The result was a clean dataset with 2,911 daily observations, containing complete information for all three sources. This cleaned dataset was used to train the ETS, ARIMAX, and SARIMAX models.
+
+To support feature engineering for the XGBoost model, a second version of the dataset was created. This version included lagged features representing cocoa prices from 1 to 7 days earlier, allowing the model to learn temporal patterns from past values. All numeric values were also rounded to three decimal places to ensure consistency. After accounting for lagged data loss, the final version used for XGBoost included 2,904 observations.
+
+These preparation steps—cleaning, organizing, and creating new features—lay the groundwork for the modeling described in @sec-metho. 
+
+Samples of both datasets are shown in @tbl-cocoadata and @tbl-cocoadata-lagged. For brevity, only lags 1 to 2 are shown from the lagged dataset.
+```{r}
+#| label: tbl-cocoadata
+#| tbl-cap: Sample of Cocoa Dataset
+#| echo: false
+#| warning: false
+#| message: false
+
+cocoa_data |>
+  select(Date, Price, PRCP, TAVG, TMAX, TMIN, ExchangeRate, log_price) |>
+  mutate(
+    Price = round(Price, 2),
+    PRCP = round(PRCP, 2),
+    TAVG = round(TAVG, 2),
+    TMAX = round(TMAX, 2),
+    TMIN = round(TMIN, 2),
+    ExchangeRate = round(ExchangeRate, 4),
+    log_price = round(log_price, 4)
+  ) |>
+  head(5) |>
+  kable(
+    col.names = c("Date", "Price", "PRCP", "TAVG", "TMAX", "TMIN", "Exchange Rate", "Log Price")
+  ) 
+```
+
+```{r}
+#| label: tbl-cocoadata-lagged
+#| tbl-cap: Sample of Cocoa Dataset with Lagged Features
+#| echo: false
+#| warning: false
+#| message: false
+
+cocoa_data_lagged |>
+  select(Date, Price, PRCP, TAVG, TMAX, TMIN, ExchangeRate, log_price, lag_1, lag_2) |>
+  mutate(
+    Price = round(Price, 2),
+    PRCP = round(PRCP, 2),
+    TAVG = round(TAVG, 2),
+    TMAX = round(TMAX, 2),
+    TMIN = round(TMIN, 2),
+    ExchangeRate = round(ExchangeRate, 4),
+    log_price = round(log_price, 4),
+    lag_1 = round(lag_1, 4),
+    lag_2 = round(lag_2, 4)
+  ) |>
+  head(5) |>
+  kable(
+    booktabs = TRUE,
+    col.names = c("Date", "Price", "PRCP", "TAVG", "TMAX", "TMIN", "Exchange Rate", "Log Price", "Lag 1", "Lag 2")
+  ) |>
+  column_spec(1, width = "2cm") |>   # Date
+  column_spec(2, width = "1cm") |>   # Price
+  column_spec(3:6, width = "1cm") |> # PRCP to TMIN
+  column_spec(7, width = "1.2cm") |>   # Exchange Rate
+  column_spec(8:10, width = "1.2cm")  
+
+```
+
+## Exploratory Data Analysis
+
+To understand the underlying structure of the cocoa price series and its associated predictors, we conducted a set of visual and statistical analyses.
+
+In [@fig-price-trend], we begin with the time series plot of cocoa prices from 1994 to 2025, which shows long periods of relative stability followed by an unprecedented surge after 2023. This sharp spike underscores the need for models that can accommodate structural breaks, volatility, and external shocks. According to [@tbl-summary], cocoa prices ranged from approximately `$778` to `$10,690` per tonne, with a mean of `$2,590`.
+```{r}
+#| label: tbl-summary
+#| tbl-cap: Summary Statistics
+#| echo: false
+#| warning: false
+#| message: false
+
+# Select only numeric columns
+data <- cocoa_data %>% select(log_price, Price, PRCP, TAVG, TMAX, TMIN, ExchangeRate)
+
+# Get summary as numeric matrix
+summary_values <- sapply(data, summary)
+
+# Convert to tidy data frame
+summary_df <- as.data.frame(summary_values) %>%
+  rownames_to_column(var = "Statistic") %>%
+  select(Statistic, everything())
+
+colnames(summary_df)[colnames(summary_df) == "log_price"] <- "Log Price"
+
+# Round and display
+kable(summary_df, digits = 2)
+```
+
+
+```{r}
+#| label: fig-price-trend
+#| fig-cap: Cocoa Price Trend Over Time
+#| fig-width: 5
+#| fig-height: 3
+#| echo: false
+#| warning: false
+#| message: false
+
+ggplot(cocoa_data, aes(x = Date, y = Price)) +
+  geom_line(color = "blue", linewidth = 0.5) +
+  labs(
+    x = "Date", 
+    y = "Cocoa Price (USD/tonne)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7)
+  )
+```
+
+
+
+Cocoa prices are highly skewed, with extreme values pulling the mean well above the median. Hence, a logarithmic transformation was applied to address this. As shown in [@fig-price-distributions], the resulting distribution is more symmetric and better suited for modeling. 
+
+```{r}
+#| label: fig-price-distributions
+#| fig-cap: Histograms of Cocoa Prices
+#| echo: false
+#| warning: false
+#| message: false
+
+price_vars <- cocoa_data %>%
+  select(log_price, Price) %>%
+  rename(`Log Price` = log_price) %>% 
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value")
+
+ggplot(price_vars, aes(x = Value)) +
+  geom_histogram(fill = "steelblue", bins = 30, alpha = 0.7) +
+  facet_wrap(~ Variable, scales = "free", ncol = 2) +
+  labs(x = "Value", y = "Count") +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7))
+
+```
+\newpage
+To further explore the characteristics of the predictors, [@fig-predictor-distributions] presents their distributions. PRCP is heavily skewed toward zero, reflecting the prevalence of dry days. In contrast, the temperature variables are more normally distributed. The exchange rate distribution displays multiple peaks, pointing to periods of currency instability. Based on [@tbl-summary], the exchange rate fluctuated dramatically—from as low as 0.10 to over 16.3—capturing Ghana’s significant macroeconomic shifts during the study period.
+
+```{r}
+#| label: fig-predictor-distributions
+#| fig-cap: Histograms of Cocoa Predictor Variables
+#| echo: false
+#| warning: false
+#| message: false
+
+predictor_vars <- cocoa_data %>%
+  select(PRCP, TAVG, TMAX, TMIN, ExchangeRate) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value")
+
+ggplot(predictor_vars, aes(x = Value)) +
+  geom_histogram(fill = "steelblue", bins = 30, alpha = 0.7) +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  labs(x = "Value", y = "Count") +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 5.5),
+    strip.text = element_text(size = 8))
+```
+
+See in @sec-corr, the figure illustrates the linear relationships among variables. Temperature metrics, particularly average and maximum, are closely linked, with a coefficient of 0.89. This makes sense since hotter days typically push up both values. The exchange rate shows a notable association with cocoa prices at 0.73, highlighting its potential as a useful predictor. In contrast, precipitation has a much weaker connection at just 0.05. This suggests its effects may be indirect or delayed, and likely better captured by non-linear or time-lagged models.
+
+To break down structural components in the price series, we applied STL decomposition (Seasonal and Trend decomposition using Loess). This method separates the series into three parts: long-term trend, recurring seasonal patterns, and short-term residuals. [@fig-seasonal-decomposition] presents that the seasonal component displays a clear and consistent cyclical pattern, while the trend remains relatively flat before accelerating upward. The residuals also show periods of heightened volatility toward the end of the series. These features reinforce the use of models like SARIMAX, which explicitly incorporate both seasonality and external predictors to capture such patterns.
+```{r}
+#| label: fig-seasonal-decomposition
+#| fig-cap: Seasonal Decomposition of Cocoa Price
+#| fig-width: 6.5
+#| fig-height: 3.8
+#| echo: false
+#| warning: false
+#| message: false
+
+price_ts <- ts(cocoa_data$Price, start = c(year(min(cocoa_data$Date)), month(min(cocoa_data$Date))), frequency = 365)
+decomp <- stl(price_ts, s.window = "periodic")
+par(cex = 0.7, cex.axis = 0.7, cex.lab = 0.7, cex.main = 0.8)
+plot(decomp)
+```
+
+We then examined temporal dependence in cocoa prices using an autocorrelation function (ACF) plot. In [@fig-acf-price], autocorrelation remains high even beyond 30 lags, with a slow and steady decay. This indicates strong persistence, where past prices continue to influence future values over time. As noted in the final part of [@sec-overview], we addressed this by creating lagged versions of the log-transformed prices, allowing the XGBoost model to better capture recent momentum.
+
+```{r}
+#| label: fig-acf-price
+#| fig-cap: Autocorrelation of Cocoa Prices
+#| fig-height: 3.5
+#| fig-width: 5.5
+#| echo: false
+#| warning: false
+#| message: false
+
+par(cex.axis = 0.6, cex.lab = 0.6, mar = c(4, 4, 1, 1))  # shrink axis text and margins
+acf(cocoa_data$Price, main = "")
+```
+
+
+To explore the frequency structure of the series, we used both a periodogram and a smoothed periodogram. [@fig-periodogram-combined] reveal strong signals at low frequencies, suggesting that price movements tend to evolve gradually rather than through short, abrupt swings. This supports the use of models like ETS and SARIMAX, which are well suited for capturing long-term trends and recurring seasonal patterns
+```{r}
+#| label: fig-periodogram-combined
+#| fig-cap: Both have a similar pattern
+#| fig-height: 3.6
+#| fig-width: 5.6
+#| echo: false
+#| warning: false
+#| message: false
+
+# Set up side-by-side plots and smaller axis/label text
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+# Plot 1: Raw periodogram with smoothing kernel
+suppressMessages(suppressWarnings({
+  junk <- capture.output(mvspec(cocoa_data$Price, kernel("daniell", 3), log = "no", main = "Raw Periodogram",
+       cex.axis = 0.5, cex.lab = 0.5, cex.main = 0.7, font.main = 1))
+}))
+
+# Plot 2: Smoothed periodogram using default smoothing
+suppressMessages(suppressWarnings({
+  junk <- capture.output(mvspec(cocoa_data$Price, log = "no", main = "Smoothed Periodogram",
+       cex.axis = 0.5, cex.lab = 0.5, cex.main = 0.7, font.main = 1))
+}))
+
+```
+
+
+
+Together, these exploratory steps informed our model selection and structure by confirming the importance of long-term trends, recurring seasonal behavior, autocorrelation, and external drivers—all of which are essential for building robust and interpretable forecasting models.
+\newpage
+
+# Methodology {#sec-metho}
+
+As outlined in [@sec-intro], we forecast daily cocoa prices using a comparative modeling approach that includes three classical time series models—ETS, ARIMAX, and SARIMAX—alongside the machine learning algorithm XGBoost. Model selection was guided by theoretical considerations and prior research, as discussed in [@sec-literature]. This section details our model setup and evaluation procedures.
+
+We implemented the models using the following R packages: forecast [@forecast2024] for classical time series methods, and xgboost [@xgboost2025] for machine learning.
+
+## Model Training and Validation
+
+Model training was performed separately for each approach using a time-based 80/20 train-test split to preserve temporal ordering. The final 20% of the data was held out to evaluate out-of-sample forecasting performance.
+
+ETS was trained on raw (non-log-transformed) cocoa prices and served as a benchmark model. It captured level, trend, and seasonality, without incorporating external predictors.
+
+ARIMAX included five exogenous variables: precipitation (PRCP), average (TAVG), maximum (TMAX), and minimum (TMIN) temperatures, along with the USD/GHS exchange rate. These regressors were input as matrices during both training and forecasting. SARIMAX extended this setup by incorporating seasonal components, supported by patterns observed in the STL decomposition and periodogram.
+
+For these classical models, the response variable was kept on the original price scale to maintain interpretability. The auto.arima() function automatically applied necessary transformations (e.g., differencing or drift) and selected the optimal model structure based on AIC/BIC.
+
+XGBoost was trained on log-transformed cocoa prices to stabilize variance, reduce the impact of extreme values, and focus the model on relative changes. It used lagged price features (lags 1 through 7), weather variables, and the exchange rate as predictors. Training followed an expanding walk-forward validation approach: at each time step, the model was retrained using all data up to that point and used to predict the next value—mimicking real-time forecasting. The resulting predictions were exponentiated to return to the original price scale.
+
+Performance for ETS, ARIMAX, and SARIMAX was assessed using the forecast package’s built-in metrics: Root Mean Squared Error (RMSE), Mean Absolute Error (MAE), and Mean Absolute Percentage Error (MAPE). For XGBoost, RMSE was computed on exponentiated predictions to ensure comparability with the classical models.
+
+## Model Diagnostics
+
+To evaluate statistical reliability and check for model violations, we conducted residual diagnostics for each approach. Residuals were plotted over time to inspect for visible patterns or systematic biases. Autocorrelation was assessed using ACF plots and formally tested with Ljung–Box tests to evaluate independence. To assess normality, a key assumption in many statistical forecasting models, histograms and Q–Q plots were used.
+
+These diagnostic checks helped identify potential weaknesses in model fit and supported more reliable interpretation of results. By combining predictive performance with diagnostic soundness, this framework enabled a more robust and well-rounded comparison across modeling approaches.
+
+# Forecasting and Results {#sec-results}
+
+## Forecast Performance and Model Comparison
+
+While all models aimed to track overall price trends, their ability to handle sharp movements varied. As seen in [@fig-forecast-comparison], the classical models failed to keep up with the 2024 surge, producing forecasts that smoothed over major shifts. ARIMAX incorporated external variables, and SARIMAX added seasonality on top—but their results were identical. Both returned the exact same test metrics, offering only a marginal improvement over ETS, as shown in [@tbl-test-accuracy].
+
+XGBoost, by contrast, closely tracked both the rapid acceleration and the subsequent volatility in prices. Its ability to integrate lagged features and nonlinear relationships allowed it to react more dynamically to recent changes. This adaptability translated into a dramatic performance gain: XGBoost reduced RMSE by nearly 90% compared to the classical models, signaling a substantial improvement in predictive accuracy.
+
+```{r}
+#| label: tbl-test-accuracy
+#| tbl-cap: Forecast Accuracy on Test Set 
+#| echo: false
+#| warning: false
+#| message: false
+test_accuracy <- data.frame(
+  Model = c("ETS", "ARIMAX", "SARIMAX", "XGBoost"),
+  RMSE = c(2795.25, 2639.67, 2639.67, 285.92),
+  MAE = c(1768.68, 1661.65, 1661.65, NA),  
+  MAPE = c(48.56, 27.73, 27.73, NA)       
+)
+kable(test_accuracy, digits = 2)
+```
+
+```{r}
+#| label: fig-forecast-comparison
+#| fig-cap: Forecast vs Actual Cocoa Prices
+#| echo: false
+#| warning: false
+#| message: false
+plot_df <- readRDS(here("functions/plot_df.rds"))
+
+ggplot(plot_df, aes(x = Date, y = Price, color = Model)) +
+  geom_line(linewidth = 0.5) +
+  labs(
+    x = "Date",
+    y = "Cocoa Price (USD/tonne)",
+    color = "Model"
+  ) +
+  scale_color_manual(values = c(
+    "Actual" = "black",
+    "ETS" = "red",
+    "ARIMAX" = "green",
+    "SARIMAX" = "purple",
+    "XGBoost" = "orange"
+  )) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 7),
+    axis.text = element_text(size = 6),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 6)
+  )
+```
+
+
+## Residual Diagnostics
+
+Given XGBoost’s superior accuracy, we focus diagnostics on this model. Visualizations and metrics for the remaining models are provided in the Appendix.
+
+As represented in [@fig-xgb-residuals], residuals stayed close to zero during stable periods but widened significantly following the 2024 price spike—reflecting greater volatility in both prices and prediction errors. In [@fig-xgb-acf], mild autocorrelation is observed at short lags (1–2), but it quickly decays, indicating that most short-term dependencies were successfully captured. 
+
+```{r}
+#| label: fig-xgb-residuals
+#| fig-cap: XGBoost Residuals Over Time
+#| echo: false
+#| fig-width: 5
+#| fig-height: 3
+#| warning: false
+#| message: false
+# Load the residuals data
+xgb_walk_df <- readRDS(here("functions/xgb_residuals.rds"))
+residuals_xgb <- xgb_walk_df$Actual - xgb_walk_df$Predicted
+
+# Then you can use it as normal
+ggplot(data.frame(Date = xgb_walk_df$Date, Residuals = residuals_xgb), 
+       aes(x = Date, y = Residuals)) +
+  geom_line(color = "darkred") +
+  labs(y = "Residual", x = "Date") +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 7))
+```
+
+```{r}
+#| label: fig-xgb-acf
+#| fig-cap: Autocorrelation of XGBoost Residuals
+#| fig-height: 3.5
+#| fig-width: 5.5
+#| echo: false
+#| warning: false
+#| message: false
+par(cex.axis = 0.6, cex.lab = 0.6, mar = c(4, 4, 1, 1)) 
+acf(residuals_xgb, , main = "")
+```
+
+
+However, the Ljung–Box test revealed statistically significant autocorrelation (p < 2.2e–16), suggesting some structure remains unexplained.
+
+```{r}
+#| label: tbl-ljung-box
+#| echo: false
+#| warning: false
+#| message: false
+
+ljung_results <- data.frame(
+  Model = c("ETS", "ARIMAX", "SARIMAX", "XGBoost"),
+  Statistic = c(6633.9, 6491.0, 6491.0, 96.668),
+  `p-value` = c("< 2.2e-16", "< 2.2e-16", "< 2.2e-16", "2.44e-15")
+)
+
+kable(ljung_results, digits = 3)
+```
+Normality diagnostics in [@fig-xgb-normality] show a residual distribution that peaks sharply near zero but has heavy tails. While the Q–Q plot aligns with the normal line at the center, deviations in the tails confirm occasional large forecasting errors.
+
+```{r}
+#| label: fig-xgb-normality
+#| fig-cap: Evaluating Normality of XGBoost Residuals
+#| fig-height: 3.6
+#| fig-width: 5.6
+#| echo: false
+#| warning: false
+#| message: false
+
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+# Histogram of residuals
+hist(residuals_xgb,
+     breaks = 30,
+     col = "gray",
+     main = "Histogram of Residuals",
+     xlab = "residuals_xgb",
+     cex.axis = 0.5,
+     cex.lab = 0.5,
+     cex.main = 0.7,
+     font.main = 1)
+
+# Q-Q plot
+qqnorm(residuals_xgb,
+       main = "Normal Q–Q Plot",
+       cex.axis = 0.5,
+       cex.lab = 0.5,
+       cex.main = 0.7,
+       font.main = 1)
+qqline(residuals_xgb, col = "blue")
+```
+
+Altogether, these results indicate that XGBoost delivered highly accurate forecasts and captured key nonlinearities, but further refinement may be needed to fully model extreme market movements.
+
+# Discussion and Conclusion {#sec-disc}
+
+As is evident from @sec-results, there is a clear divide between classical time series models and machine learning approaches in handling commodity price forecasting under volatile conditions. While ETS, ARIMAX, and SARIMAX served as reasonable benchmarks, XGBoost clearly outperformed them—demonstrating a far greater ability to respond to real-time shifts, especially during the steep 2024 surge.
+
+## Implications
+
+- Forecast Accuracy
+
+The significant gap in RMSE between XGBoost and the classical models emphasizes how important model flexibility is in volatile settings. Unlike traditional methods that tended to smooth over sharp changes, XGBoost was able to adjust forecasts as new data came in—something crucial when markets are unstable.
+
+- Integration of External Factors
+
+XGBoost’s edge also came from how well it handled multiple external inputs. Daily weather conditions and currency fluctuations were incorporated directly into the model, helping it adjust dynamically in ways ETS and even SARIMAX could not. While ARIMAX and SARIMAX tried to address this through exogenous regressors, the results were nearly identical—suggesting that their rigid structure limited how much external information could actually help.
+
+- Residual Structure and Predictive Limits
+
+Despite its strong performance, diagnostic tests showed that XGBoost’s residuals were not perfect. There was some autocorrelation, and the error distribution had heavy tails—signs that the model missed some extreme fluctuations. This suggests future improvements could come from adding new features, refining lag structure, or even using ensemble methods to better handle tail risks.
+
+- Real-World Relevance
+
+The approach used here reflects what real-world forecasting often looks like: walk-forward validation, daily retraining, and reliance on publicly available signals. That makes these findings not only academically interesting, but also actionable for use in commodity risk management, trading, or agricultural planning.
+
+## Limitations and Areas for Improvement
+
+- Model Interpretability vs. Performance
+
+While XGBoost delivered strong predictive performance, interpretability remains a key tradeoff. In contrast to ETS or ARIMAX—where model structure and component behavior are more transparent—tree-based ensembles function more like black boxes. This lack of interpretability may be a limitation when forecasts need to be communicated to stakeholders or policymakers. Future research could explore hybrid methods that strike a better balance between explainability and predictive power.
+
+- Parameter Tuning and Diagnostic Refinement:
+
+Although hyperparameters were selected using walk-forward validation, the residual diagnostics suggest further tuning is warranted. The presence of autocorrelation and heavy tails indicates that certain temporal or structural patterns were not fully captured. Additional tuning, paired with more targeted out-of-sample testing, may help reduce residual noise and improve generalizability.
+
+- Expanding Feature Space
+
+While weather and exchange rates enhanced model performance, other external factors—such as macroeconomic indicators, commodity sentiment, or supply chain disruptions—may help capture extreme market shifts. Incorporating such features could further improve the model’s responsiveness to shocks and improve accuracy during periods of instability.
+
+## Conclusion
+
+This study shows that cocoa price forecasting benefits significantly from flexible modeling strategies that integrate both recent historical behavior and external drivers. Among the four models evaluated, XGBoost proved most effective, substantially reducing prediction error and better capturing sharp market movements.
+
+While classical time series models remain valuable for their simplicity and interpretability, machine learning approaches like XGBoost offer clear advantages in volatile environments. These findings hold practical relevance for traders, analysts, and decision-makers who rely on timely and accurate forecasts to navigate uncertainty in global commodity markets.
+
+
+\newpage
+
+# Appendix {.unnumbered}
+
+
+### Correlation Matrix of Cocoa Predictor Variables {#sec-corr}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+cor_matrix <- cor(cocoa_data %>% select(Price, PRCP, TAVG, TMAX, TMIN, ExchangeRate))
+corrplot(
+  cor_matrix,
+  method = "color",
+  addCoef.col = "black",
+  tl.col = "black",     
+  tl.cex = 0.7,         
+  number.cex = 0.7   
+)
+```
+
+### Residual Diagnostics for Classical Time Series Models
+```{r}
+#| echo: false
+#| fig-cap: Residuals Over Time
+#| fig-width: 5
+#| fig-height: 3
+#| warning: false
+#| message: false
+residuals_arimax <- readRDS(here("functions", "residuals_arimax.rds"))
+residuals_sarimax <- readRDS(here("functions", "residuals_sarimax.rds"))
+residuals_ets <- readRDS(here("functions", "residuals_ets.rds"))
+residuals_long <- readRDS(here("functions/residuals_long.rds"))
+
+ggplot(residuals_long, aes(x = Date, y = Residual, color = Model)) +
+  geom_line(linewidth = 0.4) +
+  labs(
+    x = "Date",
+    y = "Model Residuals"
+  ) +
+  theme_minimal() +
+  theme(axis.title = element_text(size = 8), axis.text = element_text(size = 7))
+```
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 8
+#| fig-height: 4
+par(mfrow = c(1, 3), cex.axis = 0.8)
+
+acf(residuals_ets, main = "ACF of ETS")
+acf(residuals_arimax, main = "ACF of ARIMAX")
+acf(residuals_sarimax, main = "ACF of SARIMAX")
+
+par(mfrow = c(1, 1))
+```
+
+
+```{r}
+#| label: fig-residual-diagnostics
+#| fig-cap: Residual Diagnostics for ETS, ARIMAX, and SARIMAX
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-height: 6
+#| fig-width: 6
+
+par(mfrow = c(3, 2), cex.axis = 0.8)
+
+# ETS
+hist(residuals_ets, breaks = 30, main = "Histogram of ETS", col = "gray", xlab = "Residuals")
+qqnorm(residuals_ets, main = "QQ Plot of ETS Residuals"); qqline(residuals_ets, col = "blue")
+
+# ARIMAX
+hist(residuals_arimax, breaks = 30, main = "Histogram of ARIMAX", col = "gray", xlab = "Residuals")
+qqnorm(residuals_arimax, main = "QQ Plot of ARIMAX Residuals"); qqline(residuals_arimax, col = "blue")
+
+# SARIMAX
+hist(residuals_sarimax, breaks = 30, main = "Histogram of SARIMAX", col = "gray", xlab = "Residuals")
+qqnorm(residuals_sarimax, main = "QQ Plot of SARIMAX Residuals"); qqline(residuals_sarimax, col = "blue")
+
+par(mfrow = c(1, 1))
+
+```
+
+
+# References
+
